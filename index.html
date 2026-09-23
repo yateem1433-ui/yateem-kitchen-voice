@@ -37,7 +37,10 @@
         .pill { padding: 8px 12px; border-radius: 999px; background: var(--card); font-size: 15px; }
         .pill.on { background: #14532d; }
         .pill.off { background: #3b2a0b; }
-        #btn-settings { margin-left: auto; font-size: 20px; padding: 8px 12px; }
+        #btn-refresh { margin-left: auto; font-size: 20px; padding: 8px 12px; }
+        #btn-settings { font-size: 20px; padding: 8px 12px; }
+        #updated-at { width: 100%; font-size: 13px; }
+        .hidden-bar { width: 100%; background: #3b2a0b; color: #fde68a; font-size: 15px; margin: 0 0 12px; text-align: left; }
         #heard { margin: 10px 2px; font-size: 15px; min-height: 1.3em; overflow-wrap: anywhere; }
 
         #alert { background: #7c2d12; border: 2px solid var(--accent); border-radius: 16px; padding: 14px; margin: 8px 0 12px;
@@ -147,7 +150,9 @@
     <header>
         <span id="mode-pill" class="pill">…</span>
         <button id="mic-pill" class="pill">…</button>
+        <button id="btn-refresh" aria-label="ดึงออเดอร์ใหม่">🔄</button>
         <button id="btn-settings" aria-label="ตั้งค่า">⚙️</button>
+        <span id="updated-at" class="muted"></span>
     </header>
     <div id="heard" class="muted"></div>
 
@@ -155,6 +160,9 @@
         <div class="txt" id="alert-text"></div>
         <button id="btn-ack">รับทราบ</button>
     </section>
+
+    <!-- ปิดสวิตช์ของแห้งไว้แต่มีออเดอร์ของแห้งค้าง - บอกไว้ ไม่ให้ดูเหมือนออเดอร์ไม่เข้า -->
+    <button id="hidden-bar" class="hidden-bar hidden"></button>
 
     <div class="toolbar">
         <button id="btn-backlog">📜 อ่านค้างทั้งหมด</button>
@@ -232,8 +240,9 @@
     const ANNOUNCED_STORAGE = 'ytkVoiceAnnounced'; // orderId ที่อ่านไปแล้ว - เปิดหน้าใหม่จะไม่อ่านซ้ำ
     const SUMMARY_DONE_STORAGE = 'ytkVoiceSummaryDone';
 
-    const ACTIVE_POLL_MS = 30000;       // ช่วงขาย: เช็กออเดอร์ใหม่ทุก 30 วิ
-    const IDLE_POLL_MS = 10 * 60000;    // นอกเวลา: อัปเดตรายการเงียบๆ ทุก 10 นาที (ไม่อ่านออกเสียง)
+    // เช็กออเดอร์ใหม่ทุก 30 วิตลอดที่เปิดแอป - ลูกค้าสั่งล่วงหน้าได้ทุกวัน (เดิมนอกเวลาขายเช็กแค่ทุก 10 นาที
+    // ออเดอร์ที่สั่งวันธรรมดาเลยเหมือนไม่เข้า)
+    const POLL_MS = 30000;
     const REPEAT_MS = 60000;
     const UNDO_MS = 15000;
     const TICK_MS = 5000;
@@ -252,11 +261,19 @@
         try { localStorage.removeItem(key); } catch (e) {}
     }
 
+    const PREFS_VERSION = 2;
     const prefs = Object.assign({
-        includeNationwide: false, repeatUntilAck: true, micMode: 'continuous',
+        includeNationwide: true, repeatUntilAck: true, micMode: 'continuous',
         leadMinutes: 60, alwaysOn: false, rate: 1, volume: 1
     }, lsGet(PREFS_STORAGE, {}));
     function savePrefs() { lsSet(PREFS_STORAGE, prefs); }
+    // เวอร์ชัน 1 ซ่อนออเดอร์ของแห้งเป็นค่าเริ่มต้น ทำให้ออเดอร์ของแห้ง "ไม่เข้า" - เครื่องที่จำค่าเก่าไว้ให้เปิดแสดงครั้งเดียว
+    // (หลังจากนี้ถ้าผู้ใช้ปิดเองในหน้าตั้งค่า จะจำตามที่ปิด)
+    if ((prefs.prefsVersion || 1) < PREFS_VERSION) {
+        prefs.includeNationwide = true;
+        prefs.prefsVersion = PREFS_VERSION;
+        savePrefs();
+    }
 
     const state = {
         adminKey: lsGet(KEY_STORAGE, ''),
@@ -382,8 +399,9 @@
     }
 
     // ===== ดึงออเดอร์ =====
+    // คืน true = ดึงสำเร็จ / false = ล้มเหลว / null = มีการดึงค้างอยู่แล้ว (ปุ่ม 🔄 ใช้บอกผล)
     async function poll() {
-        if (state.polling || !state.adminKey) return;
+        if (state.polling || !state.adminKey) return null;
         state.polling = true;
         try {
             const feed = await callApi('getKitchenFeed', { adminKey: state.adminKey });
@@ -392,10 +410,12 @@
             state.settings = feed.settings;
             state.rawOrders = feed.orders || [];
             applyOrders();
+            return true;
         } catch (err) {
             state.failCount++;
-            if (/รหัสแอดมิน/.test(err.message)) { logout('รหัสแอดมินไม่ถูกต้อง หรือถูกเปลี่ยนแล้วค่ะ'); return; }
-            if (state.failCount === 3 && windowInfo(new Date()).active) speak(['ขาดการเชื่อมต่อกับระบบค่ะ กรุณาเช็กอินเทอร์เน็ต']);
+            if (/รหัสแอดมิน/.test(err.message)) { logout('รหัสแอดมินไม่ถูกต้อง หรือถูกเปลี่ยนแล้วค่ะ'); return false; }
+            if (state.failCount === 3 && state.started) speak(['ขาดการเชื่อมต่อกับระบบค่ะ กรุณาเช็กอินเทอร์เน็ต']);
+            return false;
         } finally {
             state.lastPollAt = Date.now();
             state.polling = false;
@@ -425,7 +445,8 @@
             state.backlogPending = false;
             readBacklog();
         }
-        if (w.active && state.started) announceNew();
+        // ออเดอร์ใหม่อ่านทันทีทุกเวลา (รวมออเดอร์สั่งล่วงหน้าวันธรรมดา) - ส่วนการเตือนซ้ำทุกนาทียังทำเฉพาะช่วงขาย (checkRepeat)
+        if (state.started) announceNew();
         render();
     }
 
@@ -795,7 +816,7 @@
             else if (state.wasActive === true && !w.active) speak(['หมดเวลารับออเดอร์รอบนี้แล้วค่ะ']);
             state.wasActive = w.active;
             poll();
-        } else if (Date.now() - state.lastPollAt >= (w.active ? ACTIVE_POLL_MS : IDLE_POLL_MS)) {
+        } else if (Date.now() - state.lastPollAt >= POLL_MS) {
             poll();
         }
         if (w.active) {
@@ -890,6 +911,10 @@
                 '<div class="lights">' + dots + '</div></li>';
         }).join('');
 
+        const hiddenCount = prefs.includeNationwide ? 0 : state.rawOrders.filter(o => o.type === 'nationwide').length;
+        $('hidden-bar').classList.toggle('hidden', hiddenCount === 0);
+        $('hidden-bar').textContent = '📦 ซ่อนออเดอร์ของแห้งอยู่ ' + hiddenCount + ' รายการ — แตะเพื่อแสดง';
+
         const pending = state.unacked.map(id => state.orders.find(o => o.orderId === id)).filter(Boolean);
         $('alert').classList.toggle('hidden', pending.length === 0);
         $('alert-text').textContent = '🔔 ออเดอร์ใหม่ยังไม่รับทราบ: ลำดับ ' + pending.map(o => o.seq).join(', ');
@@ -904,13 +929,15 @@
         } else if (w.active) {
             pill.textContent = '🟢 รอบขาย · ถึง ' + w.endLabel + ' น.';
         } else {
-            pill.textContent = '😴 นอกเวลา · เริ่ม ' + DAY_NAMES_TH[w.next.getDay()] + ' ' +
-                pad2(w.next.getHours()) + ':' + pad2(w.next.getMinutes()) + ' น.';
+            // นอกเวลาขายบอทยังเช็ก/อ่านออเดอร์ใหม่ทุก 30 วิ - อย่าให้ป้ายดูเหมือนแอปหลับอยู่
+            pill.textContent = '🟡 นอกเวลาขาย · รับออเดอร์ล่วงหน้าอยู่';
         }
         pill.className = 'pill ' + (w.active ? 'on' : 'off');
         const st = state.settings;
         $('window-text').textContent = 'เวลาขายจากชีต Settings: วัน' + DAY_NAMES_TH[st.orderDay] + ' ' +
             st.startHour + ':00–' + st.endHour + ':00 น.' +
+            ' · รอบถัดไปบอทเริ่มโหมดขาย ' + DAY_NAMES_TH[w.next.getDay()] + ' ' +
+            pad2(w.next.getHours()) + ':' + pad2(w.next.getMinutes()) + ' น.' +
             (st.voiceSummaryTimes ? ' · สรุปยอดเวลา ' + st.voiceSummaryTimes : '');
     }
 
@@ -929,11 +956,17 @@
 
     function renderStatus() {
         const parts = [];
+        let updated = '';
         if (state.lastPollOkAt) {
             const d = new Date(state.lastPollOkAt);
-            parts.push('อัปเดตล่าสุด ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds()));
+            updated = 'อัปเดตล่าสุด ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds()) +
+                ' · เช็กออเดอร์ใหม่ทุก 30 วิ';
         }
-        if (state.failCount) parts.push('⚠️ เชื่อมต่อไม่ได้ กำลังลองใหม่อัตโนมัติ');
+        if (state.failCount) {
+            updated += (updated ? ' · ' : '') + '⚠️ เชื่อมต่อไม่ได้ กำลังลองใหม่อัตโนมัติ';
+            parts.push('⚠️ เชื่อมต่อไม่ได้ กำลังลองใหม่อัตโนมัติ');
+        }
+        $('updated-at').textContent = updated;
         if (state.started) parts.push(wakeLock ? '🔆 จอไม่ดับ' : '⚠️ จออาจดับเอง');
         $('status-line').textContent = parts.join(' · ');
     }
@@ -1025,6 +1058,23 @@
     });
 
     $('btn-ack').addEventListener('click', () => { ackAll(); stopSpeech(); });
+    // โหมดแอปไม่มีปุ่ม reload ของ Chrome - ปุ่มนี้ดึงออเดอร์ใหม่ทันที
+    $('btn-refresh').addEventListener('click', async () => {
+        const btn = $('btn-refresh');
+        if (state.polling) { toast('กำลังดึงออเดอร์อยู่ค่ะ รอสักครู่'); return; }
+        btn.disabled = true;
+        btn.textContent = '⏳';
+        const ok = await poll();
+        btn.disabled = false;
+        btn.textContent = '🔄';
+        if (ok) toast('อัปเดตแล้ว มีออเดอร์ในคิว ' + state.orders.length + ' รายการค่ะ');
+        else if (ok === false && state.adminKey) toast('เชื่อมต่อไม่ได้ ลองใหม่อีกครั้งค่ะ');
+    });
+    $('hidden-bar').addEventListener('click', () => {
+        prefs.includeNationwide = true;
+        savePrefs();
+        applyOrders();
+    });
     $('btn-backlog').addEventListener('click', () => runCommand({ kind: 'backlog' }));
     $('btn-repeat').addEventListener('click', () => runCommand({ kind: 'repeat', seq: null }));
     $('btn-summary').addEventListener('click', () => speakSummary('สรุปยอดค่ะ'));
