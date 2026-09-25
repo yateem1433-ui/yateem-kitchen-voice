@@ -219,6 +219,10 @@
         <div class="row"><label for="opt-rate">ความเร็วเสียง</label><input id="opt-rate" type="range" min="0.6" max="1.4" step="0.1"></div>
         <div class="row"><label for="opt-volume">ความดัง</label><input id="opt-volume" type="range" min="0.2" max="1" step="0.1"></div>
         <p id="window-text" class="muted" style="font-size:14px"></p>
+        <div class="row" style="flex-direction:column;align-items:stretch;gap:6px">
+            <button id="btn-reset-queue">🔄 รีเซ็ตออเดอร์ (เริ่มลำดับ 1)</button>
+            <span id="queue-reset-text" class="muted" style="font-size:13px">ออเดอร์ที่ไฟเขียวแล้วจะหายจากจอนี้ (ข้อมูลไม่ถูกลบ) · ออเดอร์ที่ยังไม่เสร็จได้ลำดับใหม่เริ่มที่ 1</span>
+        </div>
         <div class="panel-actions">
             <button id="btn-test-voice">🔊 ทดสอบเสียง</button>
             <button id="btn-logout">ออกจากระบบ (ลืมรหัสในเครื่องนี้)</button>
@@ -362,6 +366,12 @@
     // เลขต้องเรียงตามเวลาที่สั่งเสมอ: ถ้ามีออเดอร์ที่ "สั่งก่อน" ใบที่มีเลขแล้วโผล่มาทีหลัง (เช่นเพิ่งเปิดสวิตช์ของแห้ง)
     // จะนับเลขใหม่ทั้งรอบตามเวลา - กรณีปกติคือออเดอร์ใหม่ต่อท้าย เลขเดิมไม่ขยับ
     function assignSeq(orders, round) {
+        // เลขคิวจากหลังบ้าน (queueNo) ตรงกันทุกเครื่องและหน้าแอดมิน - ใช้เมื่อทุกใบมีเลขแล้ว
+        // ออเดอร์เก่าก่อนมีระบบนี้ไม่มีเลข → นับเองในเครื่องแบบเดิมไปก่อน จนกว่าจะกดรีเซ็ตออเดอร์ครั้งแรก
+        if (orders.length && orders.every(o => o.queueNo)) {
+            orders.forEach(o => { o.seq = o.queueNo; });
+            return false;
+        }
         let s = lsGet(SEQ_STORAGE, null);
         if (!s || s.round !== round || !s.map) s = { round: round, map: {}, next: 1 };
         const sorted = orders.slice().sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
@@ -408,6 +418,8 @@
             state.failCount = 0;
             state.lastPollOkAt = Date.now();
             state.settings = feed.settings;
+            state.queue = feed.queue || null;
+            renderQueueResetText();
             state.rawOrders = feed.orders || [];
             applyOrders();
             return true;
@@ -986,6 +998,39 @@
 
     function setHeard(text) { $('heard').textContent = text; }
 
+    // ===== รีเซ็ตออเดอร์ (เริ่มลำดับ 1) - หลังบ้านเป็นคนออกเลข จึงมีผลกับทุกเครื่องพร้อมกัน =====
+    function renderQueueResetText() {
+        const q = state.queue;
+        const el = $('queue-reset-text');
+        if (!el || !q || !q.resetAt) return;
+        const d = new Date(q.resetAt);
+        el.textContent = 'รีเซ็ตล่าสุด: ' + d.getDate() + '/' + (d.getMonth() + 1) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ' น.'
+            + ' · ออเดอร์ที่ไฟเขียวแล้วจะหายจากจอนี้ ออเดอร์ที่ยังไม่เสร็จได้ลำดับใหม่เริ่มที่ 1';
+    }
+
+    async function resetQueue() {
+        const ok = confirm('รีเซ็ตออเดอร์ เริ่มลำดับ 1 ใหม่ใช่ไหมคะ?\n\n'
+            + '• ออเดอร์ที่ไฟเขียวแล้วจะหายจากจอบอทครัว (ข้อมูลไม่ถูกลบ หน้าแอดมินยังเห็น)\n'
+            + '• ออเดอร์ที่ยังไม่เสร็จ (แดง/เหลือง) จะได้ลำดับใหม่เริ่มที่ 1\n'
+            + '• มีผลกับบอทครัวทุกเครื่อง');
+        if (!ok) return;
+        const btn = $('btn-reset-queue');
+        btn.disabled = true;
+        btn.textContent = 'กำลังรีเซ็ต...';
+        try {
+            const res = await callApi('resetKitchenQueue', { adminKey: state.adminKey });
+            lsSet(SEQ_STORAGE, null); // เลขที่เครื่องนี้นับเองแบบเดิมไม่ใช้แล้ว
+            toast('✅ รีเซ็ตแล้วค่ะ ' + (res && res.carried ? 'ยกออเดอร์ที่ยังไม่เสร็จมา ' + res.carried + ' ใบ' : 'เริ่มลำดับ 1 ใหม่'));
+            await poll();
+        } catch (err) {
+            if (/รหัสแอดมิน/.test(err.message)) { logout('รหัสแอดมินไม่ถูกต้อง หรือถูกเปลี่ยนแล้วค่ะ'); return; }
+            toast('รีเซ็ตไม่สำเร็จ: ' + err.message);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = '🔄 รีเซ็ตออเดอร์ (เริ่มลำดับ 1)';
+        }
+    }
+
     let toastTimer = null;
     function toast(text) {
         const el = $('toast');
@@ -1140,6 +1185,7 @@
         speak(['ทดสอบเสียงค่ะ ออเดอร์ใหม่ ลำดับที่ 12', 'ข้าวมันไก่ 2, ชาไทย 1', 'ยอด 180 บาท'], { chime: true });
     });
     $('btn-logout').addEventListener('click', () => logout(''));
+    $('btn-reset-queue').addEventListener('click', resetQueue);
 
     // ===== บังคับติดตั้งเป็นแอป (เฉพาะ Android) =====
     // คอม/iPhone ใช้ผ่านเบราว์เซอร์ได้ตามเดิม (แอดมินใช้ทดสอบบนคอม) - มือถือครัวที่เป็น Android ต้องเปิดจากไอคอนเท่านั้น
